@@ -1,0 +1,19 @@
+Weacodi® on ESP32
+
+The firmware implementation follows the Weather Comfort Diagram™ concept by
+Oleksii Zubovskyi and Olena Zubovska. The project website is
+https://weacodi.com/ and the concept DOI is https://doi.org/10.5281/zenodo.18916318.
+
+The firmware source is available under AGPL-3.0-only (LICENSE). The diagram
+concept and its materials are available under CC BY-SA 4.0 (LICENSE_WEACODI.md).
+See LICENSE_WEACODI.md for the Weacodi® trademark notice and attribution terms.
+
+The comfort and road-condition calculations are adapted from CyclingWeather
+(https://cyclingweather.app/). The local display setup originates from cpu_graph.
+
+The embedded Noto Sans font subsets retain their SIL Open Font License 1.1
+(fonts/Noto-LICENSE.txt). The firmware includes a USERTrust RSA root certificate
+from the system CA bundle for verifying the forecast API. The Arduino ESP32 core
+and libraries installed during the build carry their respective upstream terms.
+
+Contact: zubovsky@gmail.com or weacodi@gmail.com.

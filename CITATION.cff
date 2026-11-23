@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use the Weather Comfort Diagram concept, please cite the authors and the concept preprint below."
+title: "Weacodi on ESP32"
+authors:
+  - family-names: Zubovskyi
+    given-names: Oleksii
+  - family-names: Zubovska
+    given-names: Olena
+url: https://weacodi.com/
+license: AGPL-3.0-only
+preferred-citation:
+  type: preprint
+  title: "Weacodi - One Second Forecast: An alternative way to visualize the weather forecast"
+  authors:
+    - family-names: Zubovskyi
+      given-names: Oleksii
+    - family-names: Zubovska
+      given-names: Olena
+  year: 2025
+  doi: 10.5281/zenodo.18916318
+  url: https://doi.org/10.5281/zenodo.18916318

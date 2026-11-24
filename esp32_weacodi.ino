@@ -7,6 +7,9 @@
 #include <XPT2046_Touchscreen.h>
 #include <WiFiClientSecure.h>
 #include <time.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 #include "WeatherMath.h"
 #include "forecast_ca.h"
 #include "fonts/temperatureFont.h"
@@ -63,6 +66,14 @@ struct ForecastRequestError {
   const char* message;
   const char* detail;
 };
+struct ForecastUpdate {
+  char currentHour[17];
+  ForecastSnapshot data;
+  int count;
+};
+ForecastUpdate pendingForecast;
+QueueHandle_t forecastCompletion = nullptr;
+bool forecastInFlight = false;
 unsigned long nextRefresh = 0;
 constexpr unsigned long rangeDisplayMs = 5000;
 unsigned long rangeShownAt = 0;
@@ -79,7 +90,8 @@ int minuteOfDay(const char* stamp) {
       + (stamp[14] - '0') * 10 + stamp[15] - '0';
 }
 
-bool parseForecast(Stream& stream, const char* currentHour) {
+bool parseForecast(Stream& stream, ForecastUpdate& update) {
+  const char* currentHour = update.currentHour;
   JsonDocument doc;
   auto error = deserializeJson(doc, stream);
   if (error) {
@@ -99,7 +111,6 @@ bool parseForecast(Stream& stream, const char* currentHour) {
   }
 
   const size_t count = min(times.size() - start, size_t(forecastHours));
-  static WeatherHour parsed[forecastHours];
   for (size_t i = start; i < start + count; ++i) {
     const char* stamp = times[i] | "";
     if (strlen(stamp) != 16 || !hourly["temperature_2m"][i].is<float>() ||
@@ -108,7 +119,7 @@ bool parseForecast(Stream& stream, const char* currentHour) {
       Serial.printf("Invalid hourly data at %u\n", i);
       return false;
     }
-    auto& hour = parsed[i - start];
+    auto& hour = update.data.hours[i - start];
     hour = {};
     strcpy(hour.time, stamp);
     hour.temperature = hourly["temperature_2m"][i].as<float>();
@@ -140,7 +151,9 @@ bool parseForecast(Stream& stream, const char* currentHour) {
     for (size_t j = i > hoursPerDay ? i - hoursPerDay : 0; j <= i; ++j) {
       const float total = hourly["precipitation"][j] | 0.f;
       const float liquid = liquidPrecipitation(hourly["rain"][j] | 0.f, hourly["showers"][j] | 0.f, total);
-      const float amount = max(total, liquid);
+      // Total precipitation includes snow. Use it as a fallback only without snow.
+      const bool snowing = (hourly["snowfall"][j] | 0.f) > 0.f;
+      const float amount = (liquid > 0.f || snowing) ? liquid : total;
       water += max(0.f, amount);
       if (j < i) {
         water = max(0.f, water - dryingRate(hourly["temperature_2m"][j] | 8.f,
@@ -150,14 +163,12 @@ bool parseForecast(Stream& stream, const char* currentHour) {
       }
     }
   }
-  snapshot.currentTemperature = doc["current"]["temperature_2m"] | parsed[0].temperature;
-  memcpy(snapshot.hours, parsed, count * sizeof(WeatherHour));
-  forecastCount = count;
-  forecastOffset = 0;
+  update.data.currentTemperature = doc["current"]["temperature_2m"] | update.data.hours[0].temperature;
+  update.count = count;
   return true;
 }
 
-ForecastRequestError fetchForecast(const char* currentHour) {
+ForecastRequestError fetchForecast(ForecastUpdate& update) {
   WiFiClientSecure tls;
   tls.setCACert(forecastCA);
   HTTPClient http;
@@ -169,13 +180,20 @@ ForecastRequestError fetchForecast(const char* currentHour) {
   }
   const int status = http.GET();
   Serial.printf("Forecast HTTP %d\n", status);
-  const bool usable = status == HTTP_CODE_OK && parseForecast(http.getStream(), currentHour);
+  const bool usable = status == HTTP_CODE_OK && parseForecast(http.getStream(), update);
   http.end();
   if (usable) return {nullptr, nullptr};
   if (status == HTTP_CODE_OK) return {"Forecast data missing", "Server returned no usable forecast."};
   if (status == HTTPC_ERROR_READ_TIMEOUT) return {serverUnavailable, "The forecast request timed out."};
   if (status >= 400 && status < 500) return {serverUnavailable, "Server rejected the forecast request."};
   return {serverUnavailable, "The server may be temporarily offline."};
+}
+
+// The worker owns pendingForecast until it posts the result. Only loop() draws.
+void forecastWorker(void*) {
+  const auto result = fetchForecast(pendingForecast);
+  xQueueSend(forecastCompletion, &result, portMAX_DELAY);
+  vTaskDelete(nullptr);
 }
 
 int shownHours() {
@@ -687,6 +705,31 @@ void dumpScreen() {
   }
 }
 
+void applyForecastResult() {
+  if (rangeVisible || (forecastCount == 0 && millis() - startupConnectedAt < connectedScreenMs)) return;
+  ForecastRequestError error;
+  if (xQueueReceive(forecastCompletion, &error, 0) != pdTRUE) return;
+  forecastInFlight = false;
+  if (!error.message) {
+    const bool firstForecast = forecastCount == 0;
+    snapshot = pendingForecast.data;
+    forecastCount = pendingForecast.count;
+    forecastOffset = 0;
+    hasForecast = true;
+    forecastError = nullptr;
+    if (firstForecast) showSelectedRange();
+    drawForecast();
+    nextRefresh = millis() + 15 * 60 * 1000;
+  } else {
+    tm local = {};
+    char currentHour[17];
+    const bool timeKnown = getLocalTime(&local, 0);
+    if (timeKnown) strftime(currentHour, sizeof(currentHour), "%Y-%m-%dT%H:00", &local);
+    useCachedForecast(timeKnown ? currentHour : nullptr, error.message, error.detail);
+    nextRefresh = millis() + 30000;
+  }
+}
+
 void loop() {
   handleTouch();
   updateRangeLabel();
@@ -694,6 +737,11 @@ void loop() {
     drawFooterClock(time(nullptr));
   }
   if (Serial.available() && Serial.read() == 's') dumpScreen();
+  if (forecastInFlight) {
+    applyForecastResult();
+    delay(10);
+    return;
+  }
   if (rangeVisible || !WIFI_SSID[0] || static_cast<int32_t>(millis() - nextRefresh) < 0) {
     delay(10);
     return;
@@ -723,19 +771,15 @@ void loop() {
     return;
   }
   waitingFor = nullptr;
-  const ForecastRequestError error = fetchForecast(currentHour);
-  if (firstForecast) {
-    const unsigned long elapsed = millis() - startupConnectedAt;
-    if (elapsed < connectedScreenMs) delay(connectedScreenMs - elapsed);
+  if (!forecastCompletion) {
+    forecastCompletion = xQueueCreate(1, sizeof(ForecastRequestError));
   }
-  if (!error.message) {
-    hasForecast = true;
-    forecastError = nullptr;
-    if (firstForecast) showSelectedRange();
-    drawForecast();
-    nextRefresh = millis() + 15 * 60 * 1000;
+  memcpy(pendingForecast.currentHour, currentHour, sizeof(currentHour));
+  if (forecastCompletion &&
+      xTaskCreate(forecastWorker, "forecast", 8192, nullptr, 1, nullptr) == pdPASS) {
+    forecastInFlight = true;
   } else {
-    useCachedForecast(currentHour, error.message, error.detail);
+    useCachedForecast(currentHour, serverUnavailable, "Could not start the forecast request.");
     nextRefresh = millis() + 30000;
   }
 }

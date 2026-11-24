@@ -11,6 +11,8 @@ See LICENSE_WEACODI.md for the Weacodi® trademark notice and attribution terms.
 The comfort and road-condition calculations are adapted from CyclingWeather
 (https://cyclingweather.app/). The local display setup originates from cpu_graph.
 
+The device photograph (docs/esp32-weacodi.png) was taken by the repository owner.
+
 The embedded Noto Sans font subsets retain their SIL Open Font License 1.1
 (fonts/Noto-LICENSE.txt). The firmware includes a USERTrust RSA root certificate
 from the system CA bundle for verifying the forecast API. The Arduino ESP32 core
